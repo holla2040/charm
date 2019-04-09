@@ -573,6 +573,9 @@ void addComponents(int position)
 // original from printf below
 //             u2mm(transformCoordinateX(pnpX[i], pnpPos[i])), 
 //             u2mm(transformCoordinateY(pnpY[i], pnpPos[i])), 
+//
+// this only works with 0,90,180,270 angles, really should trig inside of this fixed switch statement
+// but I was in a hurry to assemble a board
 
       switch (int(pnpAngle[i])) {
         case 0:
