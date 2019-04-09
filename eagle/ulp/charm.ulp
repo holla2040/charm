@@ -1,0 +1,1083 @@
+#usage "<b>Generates Pick and Place data for Charmhigh machines</b>\n"
+"<p>"
+"Generates a .dpv work file for CharmHigh Pick and Place Machines"
+"<author>Author: Nathan Seidle, nathan@sparkfun.com</author>"
+"<author>Author: Bernhard Woerndl-Aichriedler, bwa@xdevelop.at</author>"
+
+// while [ 1 ]; do clear; grep "0, d" a | column -t -s ','; sleep 2; done
+// grep "Ecomp" a | awk -F', ' '{print $12","$8}'  | grep -v  'R\|C\|S.*' | column -t -s ','
+
+#include "Include_String.ulp"
+// THIS PROGRAM IS PROVIDED AS IS AND WITHOUT WARRANTY OF ANY KIND, EXPRESSED OR IMPLIED
+
+
+// my modifications to Sparkfun's ConvertToCharm.ulp, https://github.com/sparkfunX/Desktop-PickAndPlace-CHMT36VA
+//
+// supports Centroid_Correction_X and Centroid_Correction_Y because some my lib models have location center
+// that doesn't match with pad location average calculated center location
+
+
+//Config options we want to save
+real      offsetY             = 0.0; 
+real      offsetX             = 0.0;
+int       enableTop           = 1;
+int       enableBottom        = 0;
+int       feederListMode      = 1;
+// sparkfun's table string    feederListUrl       = "https://docs.google.com/spreadsheet/ccc?output=csv&key=" + "1PYF-mgUX6ZCsCE1asVujuJHx-Mq8295c7aTCwVem-NQ";
+string    feederListUrl       = "https://docs.google.com/spreadsheet/ccc?output=csv&key=" + "1AwKfpmXBzCz8VyQ4Wc8Ty1obvBfCJcsIIQMDz49Ox7M";
+// https://docs.google.com/spreadsheets/d/1AwKfpmXBzCz8VyQ4Wc8Ty1obvBfCJcsIIQMDz49Ox7M/edit?usp=sharing/
+string    feederCSV           = "feeders.csv";
+int       autodetectColumns   = 1;
+int       flipHorizontal      = 1;
+string 	  defaultFileLocation = "";
+int       useAutomaticOffset  = 1;
+string    mark1               = "3.5,96.5";
+string    mark2               = "196.5,3.5";
+
+string pnpName[];
+string pnpDesignator[];
+int    pnpX[];
+int    pnpY[];
+real   pnpAngle[];
+int    pnpFeeder[];
+int    pnpPos[];    //Top or bottom
+int    pnpCount;    
+int    pnpStatsPartsTotal;
+int    pnpStatsPartsOk;
+int    pnpStatsPartsNew;
+int    pnpStatsPartsDnp;
+int    pnpStatsPartsError;
+string pnpBasefile;
+
+string  availableFeederList[];
+string  availableFeederHeadline;
+int     numberOfFeeders;
+
+int maxX        = 0;
+int minX        = 0;
+int maxY        = 0;
+int minY        = 0;
+int initialized = 0;
+real originX    = 0;
+real originY    = 0;
+real widthX     = 0;
+real widthY     = 0;
+
+//Indicies to the online table
+int COL_FEEDERID  = 1;      string NAME_FEEDERID    = "Feeder Number"      ; string DEFAULT_FEEDERID    = "0";
+int COL_COMPNAME  = 2;      string NAME_COMPNAME    = "Component"          ; string DEFAULT_COMPNAME    = "";
+int COL_ALIAS     = 3;      string NAME_ALIAS       = "Aliases"            ; string DEFAULT_ALIAS       = ""; 
+int COL_XOFFSET   = 4;      string NAME_XOFFSET     = "XOffset"            ; string DEFAULT_XOFFSET     = "0";
+int COL_YOFFSET   = 5;      string NAME_YOFFSET     = "YOffset"            ; string DEFAULT_YOFFSET     = "0";
+int COL_HEIGHT    = 6;      string NAME_HEIGHT      = "Height"             ; string DEFAULT_HEIGHT      = "0.5";
+int COL_LENGTH    = 7;      string NAME_LENGTH      = "Length"             ; string DEFAULT_LENGTH      = "0.0";
+int COL_WIDTH     = 8;      string NAME_WIDTH       = "Width"              ; string DEFAULT_WIDTH       = "0.0";
+int COL_SPEED     = 9;      string NAME_SPEED       = "Speed"              ; string DEFAULT_SPEED       = "0";
+int COL_HEAD      = 10;     string NAME_HEAD        = "Head"               ; string DEFAULT_HEAD        = "1";
+int COL_RELTAPE   = 11;     string NAME_RELTAPE     = "Relative Tape Angle"; string DEFAULT_RELTAPE     = "0";
+int COL_SPACING   = 12;     string NAME_SPACING     = "Feed Spacing"       ; string DEFAULT_SPACING     = "4";
+int COL_PLACE     = 13;     string NAME_PLACE       = "Place Component"    ; string DEFAULT_PLACE       = "Y";
+int COL_CHECK_VAC = 14;     string NAME_CHECK_VAC   = "Check Vacuum"       ; string DEFAULT_CHECK_VAC   = "Y";
+int COL_USE_VISION= 15;     string NAME_USE_VISION  = "Use Vision"         ; string DEFAULT_USE_VISION  = "Y"; 
+int COL_CENTROID_X= 16;     string NAME_CENTROID_X  = "Centroid Correction X"; string DEFAULT_CENTROID_X  = "0"; 
+int COL_CENTROID_Y= 17;     string NAME_CENTROID_Y  = "Centroid Correction Y"; string DEFAULT_CENTROID_Y  = "0"; 
+
+int MAX_FEEDER    		= 100;
+int FEEDER_NEW    		= -1;
+int FEEDER_DNP    		= 0; //This comes from eagle brd file
+int FEEDER_NO_MOUNT    	= 71; //This comes from spreadsheet
+
+string configFile  = filesetext(argv[0], ".cfg");
+
+/**
+ * Write the ULP configuration to the config file
+ */
+void configWrite(){
+  output(configFile){
+    printf("%.5f\n", offsetX);
+    printf("%.5f\n", offsetY);
+    printf("%d\n",   enableTop);
+    printf("%d\n",   enableBottom);
+    printf("%d\n",   feederListMode);
+    printf("%s\n",   feederListUrl);
+    printf("%s\n",   feederCSV);
+    printf("%d\n",   autodetectColumns);
+    printf("%d\n",   flipHorizontal);
+    printf("%s\n",   defaultFileLocation);
+    printf("%d\n",   useAutomaticOffset);
+  }
+}
+
+/**
+ * Read the ULP configuration from the config file
+ */
+void configRead() {
+  if(filesize(configFile)){ //Check if file exists
+    string data[];
+    int line = fileread(data, configFile);
+    if(line >= 5){
+      offsetX            	= strtod(data[0]);
+      offsetY            	= strtod(data[1]);
+      enableTop          	= strtol(data[2]);
+      enableBottom       	= strtol(data[3]);
+      feederListMode     	= strtol(data[4]);
+      feederListUrl      	= data[5];
+      feederCSV          	= data[6];
+      autodetectColumns  	= strtol(data[7]);
+      flipHorizontal     	= strtol(data[8]);
+      defaultFileLocation	= data[9];
+      useAutomaticOffset	= strtol(data[10]);
+    }
+  }
+}
+
+/**
+ * Add new column to the feeder list
+ * @param   name    Name of the column to add
+ * @param   value   Default value to be added to all columns 
+ */
+void addFeederColum(string name, string value){
+  sprintf(availableFeederHeadline, "%s\t%s", availableFeederHeadline, name);
+  for(int i = 0; i < numberOfFeeders; i++){
+    sprintf(availableFeederList[i], "%s\t%s", availableFeederList[i], value);
+  }
+}
+
+/** 
+ * Parse feeder list header names
+ */
+void parseRowsByHeader(){
+  string columns[];
+  int count = strsplit(columns, availableFeederHeadline, '\t');
+
+  //Invalidate row indices
+  COL_FEEDERID  = -1;
+  COL_COMPNAME  = -1;
+  COL_ALIAS     = -1; 
+  COL_XOFFSET   = -1;
+  COL_YOFFSET   = -1;
+  COL_HEIGHT    = -1;
+  COL_LENGTH    = -1;
+  COL_WIDTH     = -1;
+  COL_SPEED     = -1;
+  COL_HEAD      = -1;
+  COL_RELTAPE   = -1;
+  COL_SPACING   = -1;
+  COL_PLACE     = -1;
+  COL_CHECK_VAC = -1;
+  COL_USE_VISION= -1; 
+  COL_CENTROID_X= -1; 
+  COL_CENTROID_Y= -1; 
+
+  //Check what column contains what value
+  for(int i = 0; i < count; i++){
+    string col = stringTrim(columns[i]);
+    //Switch would be nicer here, but eagle doesn't allow for string cases
+    if(col == NAME_FEEDERID   ){COL_FEEDERID    = i;}
+    if(col == NAME_COMPNAME   ){COL_COMPNAME    = i;}
+    if(col == NAME_ALIAS      ){COL_ALIAS       = i;}
+    if(col == NAME_XOFFSET    ){COL_XOFFSET     = i;}
+    if(col == NAME_YOFFSET    ){COL_YOFFSET     = i;}
+    if(col == NAME_HEIGHT     ){COL_HEIGHT      = i;}
+    if(col == NAME_LENGTH     ){COL_LENGTH      = i;}
+    if(col == NAME_WIDTH      ){COL_WIDTH       = i;}
+    if(col == NAME_SPEED      ){COL_SPEED       = i;}
+    if(col == NAME_HEAD       ){COL_HEAD        = i;}
+    if(col == NAME_RELTAPE    ){COL_RELTAPE     = i;}
+    if(col == NAME_SPACING    ){COL_SPACING     = i;}
+    if(col == NAME_PLACE      ){COL_PLACE       = i;}
+    if(col == NAME_CHECK_VAC  ){COL_CHECK_VAC   = i;}
+    if(col == NAME_USE_VISION ){COL_USE_VISION  = i;}
+    if(col == NAME_CENTROID_X ){COL_CENTROID_X  = i;}
+    if(col == NAME_CENTROID_Y ){COL_CENTROID_Y  = i;}
+  }
+
+  //Fill up everything with default data, if not given
+  if(COL_FEEDERID   == -1){ addFeederColum(NAME_FEEDERID  , DEFAULT_FEEDERID  ); COL_FEEDERID   = count++;}
+  if(COL_COMPNAME   == -1){ addFeederColum(NAME_COMPNAME  , DEFAULT_COMPNAME  ); COL_COMPNAME   = count++;}
+  if(COL_ALIAS      == -1){ addFeederColum(NAME_ALIAS     , DEFAULT_ALIAS     ); COL_ALIAS      = count++;}
+  if(COL_XOFFSET    == -1){ addFeederColum(NAME_XOFFSET   , DEFAULT_XOFFSET   ); COL_XOFFSET    = count++;}
+  if(COL_YOFFSET    == -1){ addFeederColum(NAME_YOFFSET   , DEFAULT_YOFFSET   ); COL_YOFFSET    = count++;}
+  if(COL_HEIGHT     == -1){ addFeederColum(NAME_HEIGHT    , DEFAULT_HEIGHT    ); COL_HEIGHT     = count++;}
+  if(COL_LENGTH     == -1){ addFeederColum(NAME_LENGTH    , DEFAULT_LENGTH    ); COL_LENGTH     = count++;}
+  if(COL_WIDTH      == -1){ addFeederColum(NAME_WIDTH     , DEFAULT_WIDTH     ); COL_WIDTH      = count++;}
+  if(COL_SPEED      == -1){ addFeederColum(NAME_SPEED     , DEFAULT_SPEED     ); COL_SPEED      = count++;}
+  if(COL_HEAD       == -1){ addFeederColum(NAME_HEAD      , DEFAULT_HEAD      ); COL_HEAD       = count++;}
+  if(COL_RELTAPE    == -1){ addFeederColum(NAME_RELTAPE   , DEFAULT_RELTAPE   ); COL_RELTAPE    = count++;}
+  if(COL_SPACING    == -1){ addFeederColum(NAME_SPACING   , DEFAULT_SPACING   ); COL_SPACING    = count++;}
+  if(COL_PLACE      == -1){ addFeederColum(NAME_PLACE     , DEFAULT_PLACE     ); COL_PLACE      = count++;}
+  if(COL_CHECK_VAC  == -1){ addFeederColum(NAME_CHECK_VAC , DEFAULT_CHECK_VAC ); COL_CHECK_VAC  = count++;}
+  if(COL_USE_VISION == -1){ addFeederColum(NAME_USE_VISION, DEFAULT_USE_VISION); COL_USE_VISION = count++;}
+  if(COL_CENTROID_X == -1){ addFeederColum(NAME_CENTROID_X, DEFAULT_CENTROID_X); COL_CENTROID_X = count++;}
+  if(COL_CENTROID_Y == -1){ addFeederColum(NAME_CENTROID_Y, DEFAULT_CENTROID_Y); COL_CENTROID_Y = count++;}
+
+}
+
+/** 
+ * Get the parameter value of a specific line in the feeder list
+ * @param   line    Line in the feeder list to parse
+ * @param   col     Column to parse
+ * @return parameter value
+ */
+string getFeederParameterByLine(int line, int col){
+  string feederData[];
+  strsplit(feederData, availableFeederList[line], '\t'); 
+  return feederData[col];
+}
+
+/** 
+ * Get the parameter value of a specific feeder id
+ * @param   line    Line in the feeder list to parse
+ * @param   col     Column to parse
+ * @return parameter value
+ */
+string getFeederParameter(int feeder, int col){
+  //Check if the table is aligned correctly (line 1 is feeder 1)
+  if(feeder > 0) {
+    if(strtod(getFeederParameterByLine(feeder-1, COL_FEEDERID)) == feeder){
+      return getFeederParameterByLine(feeder-1, col);
+    }
+  }
+
+  //If not aligned, we need to work harder
+  for(int i = 0; i < numberOfFeeders; i++){
+    if(strtod(getFeederParameterByLine(i, COL_FEEDERID)) == feeder){
+      return getFeederParameterByLine(i, col);
+    }
+  }    
+  return "";
+}
+
+/**
+ * Get the feeder id for a specific part name
+ * @param   name    Combined name of the part
+ * @return If of the feeder
+ */
+int getFeederId(string name) {
+  
+  name = strlwr(stringTrim(name)); //Make lower case and trim off any white space
+
+  //Step through feeder spreadsheet. Stop before we get to MAX_FEEDER which should be the NoMount line
+  for(int i = 0; i <= MAX_FEEDER - 1; i++){
+    
+	string fname   = strlwr(stringTrim(getFeederParameter(i, COL_COMPNAME))); //Make lower case and trim off any white space
+	
+	//Issue 16. Skip the empty lines in the feeder spreadsheet that have no component name.
+	if(fname == "") continue;
+
+    //Hard compare: Does this part name match the component name from spreadsheet 
+    if(fname == name){
+      return i;
+    }
+
+	//Soft compare: Check if fname from spreadsheet is inside name of component
+	//This can lead to bad things. "2K-0603" will be found within "22K-0603" and a 2K will be mounted
+	//where a 22K should be.
+	//int pos = strstr(name, fname);
+	//if(pos != -1){ //Found!
+	//	return i;
+	//}
+
+  }
+
+  //We weren't able to locate this name in the component names so search aliases
+  for(i = 0; i <= MAX_FEEDER - 1; i++){
+    
+	//Make everything lower case and trim off any white space
+    string falias  = strlwr(stringTrim(getFeederParameter(i, COL_ALIAS)));
+
+    //Check to see if the name we are looking for is inside the aliases 
+    string aliases[];
+    int cnt = strsplit(aliases, falias, ':'); //aliases[] is now loaded with separated list of aliases for this component
+    
+	for(int k = 0; k < cnt; k++){
+
+	  if(aliases[k] != "") //The strsplit above returns records with zero length, ignore them
+	  {
+		  //Hard compare: check if name of the component matches one of the aliases
+		  if(aliases[k] == name){
+			return i;
+		  }
+
+		  //Soft compare: check if name of the component is inside one of the aliases
+		  //int pos = strstr(name, aliases[k]);
+		  //This can lead to bad things. "2K-0603" will be found within "22K-0603" and a 2K will be mounted
+		  //where a 22K should be.
+		  //if(pos != -1){ //Found!
+			//return i;
+		  //}
+	  }
+
+    }
+  }
+
+  //If we've gotten this far the name is not in component column or aliases. Soft compare the NoMount aliases against
+  //the name we are looking for.
+	
+  //Get aliases from the NoMount line (MAX_FEEDER is the last line of the spreadsheet)
+  string falias  = strlwr(stringTrim(getFeederParameter(MAX_FEEDER, COL_ALIAS)));
+
+  //Check to see if the name we are looking for is inside the aliases 
+  string aliases[];
+  int cnt = strsplit(aliases, falias, ':'); //aliases[] is now loaded with separated list of aliases for this component
+
+  for(int k = 0; k < cnt; k++){
+	//Check if this name is inside the alias list
+	if(aliases[k] != "") //The strsplit above returns records with zero length, ignore them
+	{
+	  //Hard compare: check if name of the component matches one of the aliases
+	  if(aliases[k] == name){
+		return MAX_FEEDER;
+	  }
+
+	  //Soft compare: check if name of the component is inside one of the aliases
+	  int pos = strstr(name, aliases[k]);
+	  if(pos != -1){ //Found!
+		return MAX_FEEDER;
+	  }
+	}
+  }
+
+  return -1; //Part not found in the feeder table
+}
+
+/**
+ * This function transforms the X coordinates
+ * according to the settings
+ * @return Transformed X coordinate
+ */
+int transformCoordinateX(int x, int pos){
+  //Pre default, use the automatically generated coordinates
+  int oX = minX;
+  int wX = maxX;
+
+  //If this causes problems, we allow overwriting the automatic 
+  //offset with manual information
+  if(!useAutomaticOffset){
+    oX = mm2u(originX);
+    wX = mm2u(widthX);
+  }
+
+  //Handle Top + Bottom H/V Flip transformation
+  int offset = 0;
+  if(pos == 0){
+    offset = x - oX;
+  } else {
+    if(flipHorizontal){
+      offset = wX - x;
+    } else {      
+      offset = x - oX;
+    }
+  }
+  return offset + mm2u(offsetX);
+}
+
+/**
+ * This function transforms the Y coordinates
+ * according to the settings
+ * @return Transformed X coordinate
+ */
+int transformCoordinateY(int y, int pos){
+  //Pre default, use the automatically generated coordinates
+  int oY = minY;
+  int wY = maxY;
+
+  //If this causes problems, we allow overwriting the automatic 
+  //offset with manual information
+  if(!useAutomaticOffset){
+    oY = mm2u(originY);
+    wY = mm2u(widthY);
+  }
+
+  //Handle Top + Bottom H/V Flip transformation
+  int offset = 0;
+  if(pos == 0){
+    offset = y - oY;
+  } else {
+    if(flipHorizontal){
+      offset = y - oY;
+    } else {      
+      offset = wY - y;
+    }    
+  }
+  return offset + mm2u(offsetY);
+}
+
+/**
+ * Adds the opening header information to the dpv file
+ */
+void addHeader(string prefix)
+{
+  int t = time();
+  // printf("It is now %02d:%02d:%02d\n", t2hour(t), t2minute(t), t2second(t));
+  //File header
+  printf("separated\n");
+  printf("FILE,"+prefix+".dpv\n");
+  printf("PCBFILE,charm\n");
+  printf("DATE,%04d/%02d/%02d\n",t2year(t), t2month(t), t2day(t)); //Todo pull in current date/time
+  printf("TIME,%02d:%02d:%02d\n", t2hour(t), t2minute(t), t2second(t));
+  printf("PANELYPE,0\n"); //Typo is correct. Type 0 = batch of PCBs. Type 1 = panel of PCBs. See addBatch() for info.
+  printf("\n");
+}
+
+
+/**
+ * Figures out the feeders needed and creates a material stack
+ * @param   position    Top (0) or bottom (1) layer placement
+ */
+void addFeeders(int position)
+{
+  //Create Material Stack
+  printf("\n");
+  printf("Table,No.,ID,DeltX,DeltY,FeedRates,Note,Height,Speed,Status,SizeX,SizeY\n");
+
+  int stackNumber = 0;
+
+  //Stop at MAX_FEEDER-1 because feeder 30 is the "No Mount" feeder from the spreadsheet
+  for(int i = 1; i <= MAX_FEEDER - 1; i++){
+    //Check if feeder is used
+    int used = 0;
+    for(int k = 0; k < pnpCount; k++){
+      if(pnpPos[k] == position && pnpFeeder[k] == i){
+        used = 1;
+		break;
+      }
+    }
+
+    if(used){
+      //Table,No.,ID,DeltX,DeltY,
+      //FeedRates,Note,Height,Speed,
+      //Status,SizeX,SizeY
+
+      //0b.0000.0ABC
+      //A = 1 = Use Vision
+      //A = 0 = No Vision
+      //e/B = 1 = Use Vacuum Detection
+      //B = 0 = No Vacuum Detection
+      //C = 1 = Skip placement
+      //C = 0 = Place this component
+      //Example: 3 = no place, vac, no vis
+
+      int mountValue = 0;
+      if(stringTrim(getFeederParameter(i, COL_PLACE)) == "N"){
+        mountValue += 1;  //Skip
+      }
+      if(stringTrim(getFeederParameter(i, COL_CHECK_VAC)) == "Y"){
+        mountValue += 2;  //Skip
+      }
+      if(stringTrim(getFeederParameter(i, COL_USE_VISION)) == "Y"){
+        mountValue += 4;  //Skip
+      }
+
+      //Station,0,1,0,0,4, 0.1uF,0.5,0,6,0,0
+      printf("Station, %d, %d, %s, %s, %s, %s, %s, %s, %d, %2.0f, %2.0f\n",
+             stackNumber, i, 
+             getFeederParameter(i, COL_XOFFSET), getFeederParameter(i, COL_YOFFSET),
+             getFeederParameter(i, COL_SPACING), getFeederParameter(i, COL_COMPNAME), 
+             getFeederParameter(i, COL_HEIGHT), getFeederParameter(i, COL_SPEED), mountValue, 
+             strtod(getFeederParameter(i, COL_WIDTH))*100, 
+             strtod(getFeederParameter(i, COL_LENGTH))*100
+      ); 
+
+      stackNumber++;
+    }
+  }
+}
+
+/**
+ * Add panel definition
+ * NOTE: Currently not implemented
+ */
+void addBatch()
+{
+  //Batch is where the user takes multiple copies of the same design and mounts them
+  //into the machine at the same time.
+  //Doing an array is where you have one PCB but X number of copies panelized into an array
+
+  //If you are doing a batch then the header is
+  //PANELYPE,0
+  //If you are doing an array then the header is
+  //PANELYPE,1
+  //Typo is correct.
+
+  printf("\n");
+
+  //When there is a batch of boards it looks like this
+  printf("Table,No.,ID,DeltX,DeltY\n");
+  printf("Panel_Coord,0,1,0,0\n");
+
+  //When you define an array you get this:
+  //Table,No.,ID,IntervalX,IntervalY,NumX,NumY
+  // IntervalX = x spa8cing. Not sure if this is distance between array
+  // NumX = number of copies in X direction
+  //Panel_Array,0,1,0,0,2,2
+
+  //If you have an X'd out PCB in the array you can add a skip record.
+  //When you add a skip, you get another
+  //Panel_Array,1,4,0,0,2,2 //Skip board #4 in the array
+  //This doesn't quite make sense but skips will most likely NOT be automated (user will input an X'd out board during job run)
+
+}
+
+/**
+ * Add all the components to the output file
+ * @param   position      Top (0) or bottom (1) layer placement
+ */
+void addComponents(int position)
+{
+  real x,y;
+  printf("\n");
+  printf("Table,No.,ID,PHead,STNo.,DeltX,DeltY,Angle,Height,Skip,Speed,Explain,Note\n");
+
+  int componentNumber = 0;
+  int componentID = 1;
+
+  for(int i = 0; i < pnpCount; i++){
+    if(pnpPos[i] == position && pnpFeeder[i] > 0 && pnpFeeder[i] != FEEDER_NO_MOUNT){
+      //Most all Eagle FPs are correct but we have to subtract 90 because
+      //the tapes are mounted 90 degrees from the board
+      real convertedAngle = pnpAngle[i] + 90;
+      //However, some feeders/FPs were designed not horizontal so we correct on a component by component basis
+	  real componentRotation = strtod(getFeederParameter(pnpFeeder[i], COL_RELTAPE));
+	  convertedAngle = convertedAngle + componentRotation;
+	  
+      if (convertedAngle > 180) convertedAngle -= 360; //CharmHigh machine expects rotation of -180 to 180
+      if (convertedAngle < -180) convertedAngle += 360; //CharmHigh machine expects rotation of -180 to 180
+
+      int speed = strtol(getFeederParameter(pnpFeeder[i], COL_SPEED));
+      if(speed == 100){speed = 0;}  //100% is value 0
+
+      //0b.0000.0ABC
+      //A = 1 = Use Vision
+      //A = 0 = No Vision
+      //B = 1 = Use Vacuum Detection
+      //B = 0 = No Vacuum Detection
+      //C = 1 = Skip placement
+      //C = 0 = Place this component
+      //Example: 3 = no place, vac, no vis
+
+      int mountValue = 0;
+      if(stringTrim(getFeederParameter(pnpFeeder[i], COL_PLACE)) == "N"){
+        mountValue += 1;  //Skip
+      }
+      if(stringTrim(getFeederParameter(pnpFeeder[i], COL_CHECK_VAC)) == "Y"){
+        mountValue += 2;  //Skip
+      }
+      if(stringTrim(getFeederParameter(pnpFeeder[i], COL_USE_VISION)) == "Y"){
+        mountValue += 4;  //Skip
+      }
+
+// doesn't work if part is rotated
+//             u2mm(transformCoordinateX(pnpX[i]+mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_X))), pnpPos[i])), 
+//             u2mm(transformCoordinateY(pnpY[i]+mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_Y))), pnpPos[i])), 
+// original from printf below
+//             u2mm(transformCoordinateX(pnpX[i], pnpPos[i])), 
+//             u2mm(transformCoordinateY(pnpY[i], pnpPos[i])), 
+
+      switch (int(pnpAngle[i])) {
+        case 0:
+          x = u2mm(transformCoordinateX(pnpX[i]-mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_X))), pnpPos[i]));
+          y = u2mm(transformCoordinateY(pnpY[i]-mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_Y))), pnpPos[i])); 
+          break;
+        case 90:
+          x = u2mm(transformCoordinateX(pnpX[i]+mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_Y))), pnpPos[i]));
+          y = u2mm(transformCoordinateY(pnpY[i]+mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_X))), pnpPos[i])); 
+          break;
+        case 180:
+          x = u2mm(transformCoordinateX(pnpX[i]+mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_X))), pnpPos[i]));
+          y = u2mm(transformCoordinateY(pnpY[i]+mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_Y))), pnpPos[i])); 
+          break;
+        case 270:
+          x = u2mm(transformCoordinateX(pnpX[i]-mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_Y))), pnpPos[i]));
+          y = u2mm(transformCoordinateY(pnpY[i]-mm2u(strtod(getFeederParameter(pnpFeeder[i], COL_CENTROID_X))), pnpPos[i])); 
+          break;
+      }
+
+      printf("EComponent, %d, %d, %s, %d, %.2f, %.2f, %.2f, %.2f, %d, %d, %s, %s\n",
+             componentNumber, componentID, getFeederParameter(pnpFeeder[i], COL_HEAD), pnpFeeder[i],
+             x,
+             y,
+             convertedAngle, strtod(getFeederParameter(pnpFeeder[i], COL_HEIGHT)),
+             mountValue, speed, 
+             pnpDesignator[i], getFeederParameter(pnpFeeder[i], COL_COMPNAME)
+            ); //mountValue: 6 is to place, 7 is to skip
+
+      //Example output
+      //Table,No.,ID,PHead,STNo.,DeltX,DeltY,Angle,Height,Skip,Speed,Explain,Note
+      //EComponent,0,1,1,1,16.51,12.68,0,0.5,6,0,C4, 0.1uF
+
+      componentNumber++;
+      componentID++;
+    }
+  }
+}
+
+/**
+ * Add any IC tray info
+ * NOTE: Currently not implemented
+ */
+void addICTray()
+{
+  printf("\n");
+  printf("Table,No.,ID,CenterX,CenterY,IntervalX,IntervalY,NumX,NumY,Start\n");
+}
+
+/**
+ * Add pcb calibration info
+ * NOTE: Currently not implemented
+ */
+void addPCBCalibrate()
+{
+  //Flags to say what type and if calibration of the board has been done
+  printf("\n");
+  printf("Table,No.,nType,nAlg,nFinished\n");
+  printf("PcbCalib,0,0,0,0\n");
+
+  //nType: 0 = use components as calibration marks, 1 = use marks as calibration marks
+  //nFinished: ? 0 = you haven't cal'd a board, 1 = you have cal'd the board
+}
+
+/**
+ * Add fiducial info
+ * NOTE: Currently not implemented
+ */
+void addFiducials()
+{
+  //Adds the fiducials or mark information about this board or panel
+  //TODO - Should we pull in the marks from the PCB file? It might make better
+  //sense to have user do this manually as it will be pretty specific.
+  printf("\n");
+  printf("Table,No.,ID,offsetX,offsetY,Note\n");
+  printf("CalibPoint,0,1,"+mark1+",Mark1\n");
+  printf("CalibPoint,1,2,"+mark2+",Mark2\n");
+}
+
+/**
+ * Add calibration factor
+ */
+void addCalibrationFactor()
+{
+  //Add the calibration factor. This is all the offsets calculated when the
+  //PCB is calibrated. We don't have to set anything here because the program
+  //will calculate things after user calibrates the PCB.
+
+  printf("\n");
+  printf("Table,No.,DeltX,DeltY,AlphaX,AlphaY,BetaX,BetaY,DeltaAngle\n");
+  printf("CalibFator,0,0,0,0,0,1,1,0\n"); //Typo is required
+}
+
+/** 
+ * Process all information and create the output file
+ */
+void writeOutputFile(int layer, string prefix) {
+  string fileName = filesetext(pnpBasefile, prefix + ".dpv");
+
+  if(defaultFileLocation != "")
+  {
+    fileName = defaultFileLocation + filesetext(filename(pnpBasefile), prefix + ".dpv");
+  }
+
+  //Prompt user for location to store file
+  // CH fileName = dlgFileSave("Save File", fileName, "*.dpv");
+  // CH if (fileName == "") exit(0);
+
+  defaultFileLocation = filedir(fileName); //Get just the directory structure
+
+  output(fileName) {
+    addHeader(filesetext(filename(pnpBasefile), prefix));            //Static header
+    addFeeders(layer);      //Calculate the needed feeders
+    addBatch();             //Array of PCBs?
+    addComponents(layer);   //You know, the things we're trying to place?
+    addICTray();            //Add any IC tray info here.
+    addPCBCalibrate();      //Add flag?
+    addFiducials();         //Add the fiducial/mark information
+    addCalibrationFactor(); //Add the calibration factor
+  }  
+}
+
+/** 
+ * Download the feeder data from the server
+ * or load it from CSV
+ */ 
+void downloadFeederData(){
+  if(feederListMode ==  0) { //Local CSV
+    numberOfFeeders = fileread(availableFeederList, filedir(argv[0]) + feederCSV);
+  } else {                  //Download data from url / google spreadsheets
+    numberOfFeeders = netget(availableFeederList, feederListUrl);
+  }
+
+  // Check if everything was ok
+  if (numberOfFeeders == 0){
+    dlgMessageBox("Error: Feeder file not found.", "OK");
+    exit(0);
+  }
+
+  //Process feeder data to be TSV instead of CSV and split headline and data
+  availableFeederHeadline = stringReplace(availableFeederList[0], ",", "\t");
+  for(int i = 1; i < numberOfFeeders; i++){
+    availableFeederList[i-1] = stringReplace(availableFeederList[i], ",", " \t");
+  }
+  availableFeederList[numberOfFeeders-1] = "";
+  numberOfFeeders--;
+
+  //If enabled, autodetect the row columns
+  if(autodetectColumns){
+    parseRowsByHeader();
+  }
+}
+
+/**
+ * Process the coordinates to determine min/max of the outline
+ * param  x   X coordinate of the current element
+ * param  Y   Y coordinate of the current element
+ */
+void setCoordinates(int x, int y)
+{
+  if(!initialized) {
+    maxX = x;
+    minX = x;
+    maxY = y;
+    minY = y;
+    initialized = 1;
+  }
+
+  if(x < minX) {
+    minX = x;
+  }
+  if(y < minY) {
+    minY = y;
+  }
+  if(y > maxY) {
+    maxY = y;  
+  }
+  if(x > maxX) {
+    maxX = x;  
+  }
+}
+
+/**
+ * Load all required information from the board
+ */
+void loadBoardInformation() {
+  pnpCount            = 0;
+  pnpStatsPartsTotal  = 0;
+  pnpStatsPartsOk     = 0;
+  pnpStatsPartsNew    = 0;
+  pnpStatsPartsDnp    = 0;
+  pnpStatsPartsError  = 0;
+
+
+  //Walk trough all elements for the board
+  board(B) {
+    pnpBasefile = B.name;
+
+    B.elements(E) {
+      int isSmd = 0;
+      int isBottom = 0;
+
+      //Determine centroid offset of the element
+      int xmax = -2147483648,
+          xmin = 2147483647,
+          ymax = xmax,
+          ymin = xmin;	  
+      E.package.contacts(C) {
+        if (C.smd && C.smd.layer == 1) {
+          isSmd = 1;
+
+	        //Find centroid of this component
+          if (C.x > xmax) xmax = C.x;
+          if (C.y > ymax) ymax = C.y;
+          if (C.x < xmin) xmin = C.x;
+          if (C.y < ymin) ymin = C.y;
+        }
+        if (C.smd && C.smd.layer == 16) {
+          isSmd = 1;
+          isBottom = 1;
+
+          if (C.x > xmax) xmax = C.x;
+          if (C.y > ymax) ymax = C.y;
+          if (C.x < xmin) xmin = C.x;
+          if (C.y < ymin) ymin = C.y;
+        }
+      }
+
+      //If the part is SMD, process it
+      if (isSmd) {
+		real xCenter = (xmin + xmax) / 2;
+   		real yCenter = (ymin + ymax) / 2;
+
+		
+        pnpName[pnpCount]       = E.value + '-' + E.package.name;
+        pnpDesignator[pnpCount] = E.name;
+        pnpX[pnpCount]          = xCenter;
+        pnpY[pnpCount]          = yCenter;
+        pnpAngle[pnpCount]      = E.angle;
+        pnpPos[pnpCount]        = isBottom;
+
+
+
+        //If we want to populate the device
+        if(E.populate && E.attribute["POPULATE"] != "DNP"){
+          pnpFeeder[pnpCount]   = getFeederId(pnpName[pnpCount]);
+        } else {
+          pnpFeeder[pnpCount]   = FEEDER_DNP;
+        }
+
+        //Update stats
+        pnpStatsPartsTotal++;
+        if(pnpFeeder[pnpCount] == FEEDER_NEW){
+          pnpStatsPartsNew++;
+        } else if(pnpFeeder[pnpCount] == FEEDER_DNP){
+          pnpStatsPartsDnp++;
+        } else {
+          pnpStatsPartsOk++;
+        }
+
+        pnpCount++;
+      }
+
+      //Autodetect to board outline
+      B.wires(W) {
+        if(W.layer == 20) {
+          if(W.arc) {
+            setCoordinates(W.arc.x1, W.arc.y1);
+            setCoordinates(W.arc.x2, W.arc.y2);
+            
+            int angle = W.arc.angle2 - W.arc.angle1;
+            
+            int set_elements = round(angle/90);
+            int start_element = round(W.arc.angle1/90);
+            start_element = start_element % 4;
+            
+            for(int i = start_element; i < (start_element + set_elements); i++) {
+              if(i == 0) {
+                setCoordinates(W.arc.xc - W.arc.radius, W.arc.y1);
+              } else if(i == 1) {
+                setCoordinates(W.arc.x2, W.arc.yc + W.arc.radius);
+              } else if(i == 2) {
+                setCoordinates(W.arc.xc + W.arc.radius, W.arc.y1);
+              } else if(i == 3) {
+                setCoordinates(W.arc.x2, W.arc.yc - W.arc.radius);
+              }
+            }
+          } else {
+            setCoordinates(W.x1, W.y1);
+            setCoordinates(W.x2, W.y2);
+          }
+        }
+      }
+
+      B.circles(C) {
+        if(C.layer == 20) {
+          setCoordinates(C.x + C.radius, C.y + C.radius);
+          setCoordinates(C.x - C.radius, C.y - C.radius);
+        }
+      }
+    } 
+  }
+}
+
+/**
+ * GUI Data
+ */
+int showListOfDevices()
+{
+  int selected = 0;
+  int sorted = 0;
+  int sortedFeedersUsed = 1;
+  int quantity = 1;
+  configRead();
+  downloadFeederData();
+
+  loadBoardInformation();
+  widthX = u2mm(maxX);
+  widthY = u2mm(maxY);
+
+  //Re-display dialog as long as we don't abort
+  while(1){
+
+    //Generate / refresh the part list
+    string partlist[];
+    pnpStatsPartsError = 0;
+    for(int i = 0; i < pnpCount; i++){
+      partlist[i] = "";
+      string feeder = "";
+
+  	  //Check the feeder spreadsheet to see if we should ignore this part (may be a fiducial)
+	  string noMountAlias = getFeederParameterByLine(29, COL_ALIAS);
+
+      if(pnpFeeder[i] == FEEDER_NEW){
+        feeder = "No feeder assigned!";
+      } else if(pnpFeeder[i] == FEEDER_DNP){
+        feeder = "No Mount";
+      } else if(pnpFeeder[i] == FEEDER_NO_MOUNT){
+        feeder = "No Mount";
+      } else {
+        sprintf(feeder, "%d", pnpFeeder[i]);
+      }
+
+      int tX = transformCoordinateX(pnpX[i], pnpPos[i]);
+      int tY = transformCoordinateY(pnpY[i], pnpPos[i]);
+
+      if(tX < 0 || tY < 0){
+        pnpStatsPartsError++;
+      }
+
+      sprintf(partlist[i], "%s\t%s\t%s\t%.2fmm\t%.2fmm\t%.2fmm\t%.2fmm\t%.1f°\t%s", 
+          pnpDesignator[i], pnpName[i], (pnpPos[i]==0)?"Top":"Bottom", 
+          u2mm(pnpX[i]), u2mm(tX), 
+          u2mm(pnpY[i]), u2mm(tY), 
+          pnpAngle[i], feeder
+      );
+    } 
+	
+	//Generate Feeders Used list. Helpful for seeing what feeders we need to load or assign
+    string listOfUsedFeeders;
+	string usedFeederList[]; //Used in GUI
+	int usedFeederCount = 0;
+    for(i = 0; i < pnpCount; i++){
+
+      string feeder = "";
+      if(pnpFeeder[i] == FEEDER_NEW){
+        feeder = "None";
+      } else if(pnpFeeder[i] == FEEDER_DNP){
+        feeder = "Do not mount!";
+      } else {
+        sprintf(feeder, "%d", pnpFeeder[i]);
+      }
+
+	  //Ignore parts from record NoMount row
+	  if(pnpFeeder[i] != FEEDER_NO_MOUNT)
+	  {
+		//If this feeder is new, it doesn't have a nickname  
+		if(pnpFeeder[i] == FEEDER_NEW){
+		  //See if this feeder is already in the list
+		  if (strstr(listOfUsedFeeders, pnpName[i]) == -1)
+		  {
+			//Add this component name to the list of used feeders
+			listOfUsedFeeders += pnpName[i] + '\n';
+
+			//We don't have a feeder for this component so maintain its name
+			sprintf(usedFeederList[usedFeederCount++], "%s\t%s\t", 
+			  feeder, pnpName[i]
+			);
+		  }
+		}
+		//Known feeder: See if this feeder's nickname is already in the list
+		else if (strstr(listOfUsedFeeders, getFeederParameter(pnpFeeder[i], COL_COMPNAME) ) == -1)
+		{
+		  //Add this component's nickname to the list of used feeders
+		  listOfUsedFeeders += getFeederParameter(pnpFeeder[i], COL_COMPNAME) + '\n';
+			
+		  //We have a nickname for this component from the spreadsheet so use it
+		  sprintf(usedFeederList[usedFeederCount++], "%s\t%s\t", 
+		    feeder, getFeederParameter(pnpFeeder[i], COL_COMPNAME)
+		  );
+		}
+	  }
+    } 
+		
+    //Display main dialog
+    int dstatus = dlgDialog("Feeder configuration"){
+      dlgHBoxLayout{
+        dlgVBoxLayout dlgSpacing(800);
+        dlgTabWidget {
+          dlgTabPage("Parts Overview") {
+            dlgHBoxLayout {
+              dlgListView("Designator\tComponent\tPosition\tBoard X\tPlacement X\tBoard Y\tPlacement Y\tAngle\tFeeder", partlist, selected, sorted);
+              dlgVBoxLayout {
+                dlgGroup("Offset") {
+                  dlgRadioButton("Use manual origin and size",     useAutomaticOffset); 
+                  dlgHBoxLayout{ dlgLabel("Origin X:\t");             dlgRealEdit(originX, -10000, 10000); dlgLabel("mm");}  
+                  dlgHBoxLayout{ dlgLabel("Origin Y:\t");             dlgRealEdit(originY, -10000, 10000); dlgLabel("mm");}  
+                  dlgHBoxLayout{ dlgLabel("Width:   \t");             dlgRealEdit(widthX, -10000, 10000);  dlgLabel("mm");}  
+                  dlgHBoxLayout{ dlgLabel("Height:  \t");             dlgRealEdit(widthY, -10000, 10000);  dlgLabel("mm");}  
+                  dlgRadioButton("Use automatic offset",  useAutomaticOffset);          
+                  dlgHBoxLayout{ dlgLabel("Origin X:\t\t");           dlgLabel(itoa(u2mm(-minX)) + "mm"); }
+                  dlgHBoxLayout{ dlgLabel("Origin Y:\t\t");           dlgLabel(itoa(u2mm(-minY)) + "mm"); }
+                  dlgHBoxLayout{ dlgLabel("Width X:\t\t");            dlgLabel(itoa(u2mm(maxX-minX)) + "mm"); }
+                  dlgHBoxLayout{ dlgLabel("Height Y:\t\t");           dlgLabel(itoa(u2mm(maxY-minY)) + "mm"); }
+                }
+                dlgGroup("Additional Offset") {
+                  dlgHBoxLayout{ dlgLabel("Offset X:\t");         dlgRealEdit(offsetX, -10000, 10000);     dlgLabel("mm");} 
+                  dlgHBoxLayout{ dlgLabel("Offset Y:\t");         dlgRealEdit(offsetY, -10000, 10000);     dlgLabel("mm");}             
+                }
+                dlgPushButton("Apply settings") {
+                  dlgAccept();
+                } 
+                if(pnpStatsPartsError){
+                  dlgLabel("Negative part coordinates are not supported, \nplease correct the offset!");
+                }
+                dlgStretch(1);
+              }
+            }
+          }
+          dlgTabPage("Feeder Database") {
+            dlgListView(availableFeederHeadline, availableFeederList, selected, sorted);
+          }
+          dlgTabPage("Feeders Used") {
+            dlgListView("Feeder Number\tPart Name", usedFeederList, selected, sortedFeedersUsed);
+          }
+        }
+        dlgVBoxLayout {
+          dlgGroup("Feeder Config") {
+            dlgRadioButton("Local CSV", feederListMode);
+            dlgStringEdit(feederCSV); 
+            dlgRadioButton("Google Spreadsheet", feederListMode);
+            dlgStringEdit(feederListUrl); 
+            dlgCheckBox("Autodetect columns", autodetectColumns);
+            dlgPushButton("Refresh Feeder List") {
+              downloadFeederData();
+              dlgAccept();
+            }
+          }
+          dlgGroup("Statistics") { 
+            dlgHBoxLayout{ dlgLabel("Parts total:\t\t");         dlgLabel(itoa(pnpStatsPartsTotal)); }
+            dlgHBoxLayout{ dlgLabel("Parts to mount:\t\t");      dlgLabel(itoa(pnpStatsPartsOk));    }
+            dlgHBoxLayout{ dlgLabel("Parts not assigned:\t\t");  dlgLabel(itoa(pnpStatsPartsNew));   }
+            dlgHBoxLayout{ dlgLabel("Parts not mounted:\t\t");   dlgLabel(itoa(pnpStatsPartsDnp));   }
+          }
+          dlgGroup("Output") {
+            dlgCheckBox("Top placement data", enableTop);
+            dlgCheckBox("Bottom placement data", enableBottom);
+            dlgGroup("Bottom flip") {
+              dlgRadioButton("Flip vertical",   flipHorizontal);
+              dlgRadioButton("Flip horizontal", flipHorizontal);
+            }
+
+            writeOutputFile(0, "-top");
+
+            dlgPushButton("Save output file") {
+              if(enableTop){
+                writeOutputFile(0, "-top");
+              }
+              if(enableBottom){
+                writeOutputFile(1, "-bot");
+              }
+              dlgAccept(-1);
+            }           
+          }
+          dlgStretch(1);
+        }
+      }
+    };
+
+    //Write the config file
+    configWrite();
+
+    //If are done, abort
+    if(dstatus == -1){break;}
+
+    //If we don't abort, refresh config
+    loadBoardInformation();
+  }
+  return 1;
+}
+
+if (!board) {
+    dlgMessageBox("\n    Start this ULP in a Board    \n");
+    exit (0);  
+} else {
+
+    showListOfDevices();
+}
