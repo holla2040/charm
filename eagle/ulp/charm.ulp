@@ -979,12 +979,21 @@ int showListOfDevices()
 		}
 	  }
     } 
+    writeOutputFile(0, "-top");
 		
     //Display main dialog
     int dstatus = dlgDialog("Feeder configuration"){
       dlgHBoxLayout{
         dlgVBoxLayout dlgSpacing(800);
         dlgTabWidget {
+          dlgTabPage("Output File") {
+            dlgVBoxLayout {
+              string lines;
+              string fileName = filesetext(pnpBasefile, "-top.dpv");
+              int nLines = fileread(lines, fileName); 
+              dlgTextView("<pre>"+lines+"</pre>");
+            }
+          }  
           dlgTabPage("Parts Overview") {
             dlgHBoxLayout {
               dlgListView("Designator\tComponent\tPosition\tBoard X\tPlacement X\tBoard Y\tPlacement Y\tAngle\tFeeder", partlist, selected, sorted);
@@ -1021,6 +1030,8 @@ int showListOfDevices()
           dlgTabPage("Feeders Used") {
             dlgListView("Feeder Number\tPart Name", usedFeederList, selected, sortedFeedersUsed);
           }
+
+
         }
         dlgVBoxLayout {
           dlgGroup("Feeder Config") {
@@ -1048,7 +1059,6 @@ int showListOfDevices()
               dlgRadioButton("Flip horizontal", flipHorizontal);
             }
 
-            writeOutputFile(0, "-top");
 
             dlgPushButton("Save output file") {
               if(enableTop){
