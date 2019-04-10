@@ -1,0 +1,5 @@
+Nozzle Selection
+* 502 Nozzle for 0402
+* 503 Nozzle for 0603 n 0805
+* 504 Nozzle for 0805 n 1206
+* 505 Nozzle for 3535 led 
